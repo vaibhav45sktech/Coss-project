@@ -1,0 +1,14 @@
+pydantic==2.5.3
+pyyaml==6.0.1
+faker==22.0.0
+transformers==4.38.0
+datasets==2.16.0
+trl==0.7.10
+peft==0.8.0
+accelerate==0.27.0
+torch==2.2.0
+pytest==7.4.4
+presidio-analyzer==2.2.351
+presidio-anonymizer==2.2.351
+spacy==3.7.2
+datasketch==1.6.4
