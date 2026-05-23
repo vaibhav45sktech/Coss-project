@@ -9,3 +9,6 @@ data/exports/
 *.egg-info/
 .vscode/
 .idea/
+.claude/
+terminal_output.*
+*.pdf
