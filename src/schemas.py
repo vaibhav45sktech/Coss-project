@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, Literal
 
@@ -84,7 +84,7 @@ class Trajectory(BaseModel):
     domain_tag: Optional[str] = None
     complexity_bucket: Literal["simple", "moderate", "complex"]
     language_mix: Literal["en", "hi", "code_mixed"]
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class SFTMessage(BaseModel):
