@@ -28,6 +28,12 @@ _TOOL_DOMAIN: dict[str, str] = {
     "verify_pm_kisan_eligibility": "scheme",
     "get_agro_climatic_zone": "calendar",
     "crop_calendar": "calendar",
+    # Production tool names (Module 5 mock tools)
+    "weather_forecast": "irrigation",
+    "fetch_agristack_data": "scheme",
+    "mandi_prices": "price",
+    "soil_test_report": "irrigation",
+    "govt_scheme_lookup": "scheme",
 }
 
 # Hinglish markers used for language detection (matched as whole words)
