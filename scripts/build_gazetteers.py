@@ -59,6 +59,11 @@ NAMES = [
     "heer", "vaibhav", "abhishek", "abhilash", "aarti", "alok",
     # Common short forms
     "raj", "kumar", "singh", "devi", "rao", "reddy",
+    # Names from observed synthetic data + commonly missed
+    "navya", "shaurya", "ishita", "tanvi", "myra", "aanya", "kiara",
+    "advait", "reyansh", "atharv", "vihaan", "shaurya", "kabir",
+    "tara", "diya", "saanvi", "anika", "khushi", "ananya",
+    "lakshay", "ayaan", "rudra", "viraj", "neel", "om",
 ]
 
 VILLAGES = [

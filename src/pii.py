@@ -282,6 +282,49 @@ class IndianPIIRules:
                 ))
         return results
 
+    # Words that should NOT be captured as names even after introduction phrases.
+    # Catches Hinglish nouns and common English words that follow phrases like "I am".
+    NAME_CONTEXT_STOPWORDS = {
+        "and", "from", "with", "but", "or", "the", "a", "an",
+        "i", "we", "my", "your", "his", "her", "their",
+        "looking", "asking", "calling", "writing", "checking",
+        "very", "really", "just", "also", "still", "now",
+        "mere", "kya", "kab", "hai", "ka", "ki", "ke", "ko", "se",
+        "yes", "no", "ok", "okay", "pm", "msp",
+    }
+
+    # Inline-case-insensitive intro phrase, but case-SENSITIVE name capture
+    # (must start uppercase, followed only by lowercase). This prevents
+    # "and", "AND", or all-caps acronyms from being swept into the name span.
+    NAME_CONTEXT_RE = re.compile(
+        r"(?i:my name is|i am|i'm|this is|name is|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b",
+    )
+
+    def detect_names_by_context(self, text: str) -> list[PIIMatch]:
+        """Catch names introduced by phrases like 'my name is X'.
+
+        Safety net for rare names not in the gazetteer. Filters stopwords
+        (English connectors + common Hinglish nouns) to avoid over-capture
+        on sentences like 'I am looking for' or 'mere tamatar mein'.
+        """
+        results = []
+        for m in self.NAME_CONTEXT_RE.finditer(text):
+            name = m.group(1).strip()
+            first_token = name.split()[0].lower()
+
+            # Drop matches where the captured token is a stopword
+            if first_token in self.NAME_CONTEXT_STOPWORDS:
+                continue
+
+            results.append(PIIMatch(
+                pii_type="NAME",
+                start=m.start(1),
+                end=m.end(1),
+                original=name,
+                confidence=0.85,
+            ))
+        return results
+
     # ---- aggregator ----
 
     def detect_all(self, text: str) -> list[PIIMatch]:
@@ -300,6 +343,7 @@ class IndianPIIRules:
         matches.extend(self.detect_ifsc(text))
         matches.extend(self.detect_bank_account(text))
         matches.extend(self.detect_names(text))
+        matches.extend(self.detect_names_by_context(text))  # ← new
         matches.extend(self.detect_villages(text))
         return sorted(matches, key=lambda m: m.start)
 
@@ -307,14 +351,11 @@ class IndianPIIRules:
 class PresidioPIIDetector:
     """Wraps Microsoft Presidio for NLP-based entity detection.
 
-    Catches English PERSON / LOCATION / ORGANIZATION entities that our
-    regex+gazetteer layer would miss (e.g. unfamiliar names, foreign
-    locations, company names). Initialized lazily — Presidio's AnalyzerEngine
-    takes 1-2 seconds to load the spaCy model, so we do it once per process.
+    Cross-references gazetteers to fix common Presidio mistakes on Indian text:
+    - 'Ludhiana' looks like PERSON to spaCy NER → re-tagged as LOCATION
+    - Domain vocabulary ('Aadhaar', 'Kisan') filtered as false positives
     """
 
-    # Map Presidio's entity labels to our internal PIIMatch types.
-    # Keeping a tight allowlist avoids noisy matches (URL, DATE_TIME, etc).
     ENTITY_MAP = {
         "PERSON": "NAME",
         "LOCATION": "LOCATION",
@@ -324,19 +365,23 @@ class PresidioPIIDetector:
         "CREDIT_CARD": "CREDIT_CARD",
     }
 
-    # Words Presidio sometimes mis-tags as PERSON in Indian/agri context.
-    # These are domain vocabulary, not real names — drop them.
+    # Words Presidio mis-tags as PERSON in Indian/agri context.
     PERSON_STOPWORDS = {
         "aadhaar", "pan", "pm-kisan", "pm", "kisan", "msp",
         "kharif", "rabi", "zaid", "rtc", "khasra", "ifsc",
-        "hdfc", "sbi", "icici", "axis",  # banks
-        "mandi", "fasal", "kheti", "paani",
+        "hdfc", "sbi", "icici", "axis",
+        "mandi", "fasal", "kheti", "paani", "ragi", "bajra",
     }
 
-    def __init__(self):
+    def __init__(self, villages_gazetteer: set[str] | None = None):
         from presidio_analyzer import AnalyzerEngine
         self._analyzer = AnalyzerEngine()
-        logger.info("Presidio analyzer initialized")
+        # If villages gazetteer provided, use it to correct PERSON→LOCATION mistakes
+        self._villages = villages_gazetteer or set()
+        logger.info(
+            f"Presidio analyzer initialized "
+            f"(cross-referencing {len(self._villages)} known villages)"
+        )
 
     def detect(self, text: str) -> list[PIIMatch]:
         try:
@@ -355,8 +400,17 @@ class PresidioPIIDetector:
             if our_type is None:
                 continue
             matched_text = text[r.start:r.end]
-            if our_type == "NAME" and matched_text.lower().strip() in self.PERSON_STOPWORDS:
+            normalized = matched_text.lower().strip()
+
+            # Filter domain-vocabulary false positives
+            if our_type == "NAME" and normalized in self.PERSON_STOPWORDS:
                 continue
+
+            # If Presidio says PERSON but the word is a known village,
+            # re-tag as LOCATION. This fixes 'Ludhiana' → NAME mistakes.
+            if our_type == "NAME" and normalized in self._villages:
+                our_type = "LOCATION"
+
             matches.append(PIIMatch(
                 pii_type=our_type,
                 start=r.start,
@@ -388,7 +442,7 @@ class PIIPipeline:
 
     def __init__(self, use_presidio: bool = True):
         self.rules = IndianPIIRules()
-        self.presidio = PresidioPIIDetector() if use_presidio else None
+        self.presidio = PresidioPIIDetector(villages_gazetteer=self.rules.villages) if use_presidio else None
         self._placeholder_map: dict[tuple[str, str], str] = {}
         self._counters: dict[str, int] = {}
 
@@ -472,8 +526,137 @@ class PIIPipeline:
             cursor = m.end
         out_parts.append(text[cursor:])
         return "".join(out_parts), matches
-        
-        
+
+    # ---- trajectory-level redaction ----
+
+    def redact_trajectory(self, trajectory_dict: dict) -> tuple[dict, list[dict]]:
+        """Redact all PII in every event of a trajectory.
+
+        Resets the placeholder map at the start so each trajectory has its own
+        isolated placeholder namespace (privacy isolation across sessions).
+
+        Args:
+            trajectory_dict: a trajectory as a dict (loaded from JSONL)
+
+        Returns:
+            (redacted_trajectory_dict, audit_records)
+            audit_records is a list of per-event redactions for the audit log:
+                [{"event_id": ..., "field": ..., "original": ..., "redacted": ...,
+                  "matches": [...]}, ...]
+            Empty if no PII was found in the trajectory.
+        """
+        self.reset_session()
+        audit_records: list[dict] = []
+
+        for event in trajectory_dict["events"]:
+            # Redact the content field (user/assistant/system messages)
+            if event.get("content"):
+                redacted, matches = self.redact(event["content"])
+                if matches:
+                    audit_records.append({
+                        "event_id": event["event_id"],
+                        "field": "content",
+                        "original": event["content"],
+                        "redacted": redacted,
+                        "matches": [
+                            {
+                                "type": m.pii_type,
+                                "confidence": m.confidence,
+                                "source": m.source,
+                                "original": m.original,
+                            }
+                            for m in matches
+                        ],
+                    })
+                    event["content"] = redacted
+
+            # Redact tool_args (a dict of string values mostly)
+            if event.get("tool_args"):
+                event["tool_args"], arg_audits = self._redact_dict_strings(
+                    event["tool_args"], event["event_id"], "tool_args"
+                )
+                audit_records.extend(arg_audits)
+
+            # Redact tool_output (also a dict)
+            if event.get("tool_output"):
+                event["tool_output"], out_audits = self._redact_dict_strings(
+                    event["tool_output"], event["event_id"], "tool_output"
+                )
+                audit_records.extend(out_audits)
+
+        return trajectory_dict, audit_records
+
+    def _redact_dict_strings(
+        self,
+        d: dict,
+        event_id: str,
+        field_name: str,
+    ) -> tuple[dict, list[dict]]:
+        """Recursively walk a dict and redact any string values.
+
+        We only redact string leaves — numbers, bools, and nested dicts pass through
+        (nested dicts are recursed into). This prevents accidental corruption of
+        structured fields like `price_per_quintal: 2150`.
+        """
+        audits: list[dict] = []
+        new_d: dict = {}
+        for key, value in d.items():
+            if isinstance(value, str):
+                redacted, matches = self.redact(value)
+                if matches:
+                    audits.append({
+                        "event_id": event_id,
+                        "field": f"{field_name}.{key}",
+                        "original": value,
+                        "redacted": redacted,
+                        "matches": [
+                            {
+                                "type": m.pii_type,
+                                "confidence": m.confidence,
+                                "source": m.source,
+                                "original": m.original,
+                            }
+                            for m in matches
+                        ],
+                    })
+                new_d[key] = redacted
+            elif isinstance(value, dict):
+                new_d[key], nested_audits = self._redact_dict_strings(
+                    value, event_id, f"{field_name}.{key}"
+                )
+                audits.extend(nested_audits)
+            elif isinstance(value, list):
+                # Lists may contain dicts (e.g. weather forecast). Recurse into them.
+                new_list = []
+                for item in value:
+                    if isinstance(item, dict):
+                        red_item, nested_audits = self._redact_dict_strings(
+                            item, event_id, f"{field_name}.{key}[]"
+                        )
+                        new_list.append(red_item)
+                        audits.extend(nested_audits)
+                    elif isinstance(item, str):
+                        redacted, matches = self.redact(item)
+                        if matches:
+                            audits.append({
+                                "event_id": event_id,
+                                "field": f"{field_name}.{key}[]",
+                                "original": item,
+                                "redacted": redacted,
+                                "matches": [
+                                    {"type": m.pii_type, "confidence": m.confidence,
+                                     "source": m.source, "original": m.original}
+                                    for m in matches
+                                ],
+                            })
+                        new_list.append(redacted)
+                    else:
+                        new_list.append(item)
+                new_d[key] = new_list
+            else:
+                # numbers, bools, None — pass through unchanged
+                new_d[key] = value
+        return new_d, audits
 
 
 # ---------------------------------------------------------------------------
