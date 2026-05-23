@@ -371,6 +371,11 @@ class PresidioPIIDetector:
         "kharif", "rabi", "zaid", "rtc", "khasra", "ifsc",
         "hdfc", "sbi", "icici", "axis",
         "mandi", "fasal", "kheti", "paani", "ragi", "bajra",
+        # Hinglish function words commonly mis-tagged as PERSON
+        "hun", "aur", "hai", "hain", "tha", "thi", "ka", "ki",
+        "ke", "ko", "se", "par", "mein", "mere", "meri", "mera",
+        "tera", "teri", "mein", "aap", "main", "tu", "yeh", "woh",
+        "kya", "kab", "kaise", "kyun", "kahan",
     }
 
     def __init__(self, villages_gazetteer: set[str] | None = None):
@@ -403,8 +408,14 @@ class PresidioPIIDetector:
             normalized = matched_text.lower().strip()
 
             # Filter domain-vocabulary false positives
-            if our_type == "NAME" and normalized in self.PERSON_STOPWORDS:
-                continue
+            if our_type == "NAME":
+                # Check if ALL tokens in the match are stopwords → reject as PII
+                tokens = matched_text.lower().split()
+                if tokens and all(t in self.PERSON_STOPWORDS for t in tokens):
+                    continue
+                # Also reject if the match is a single stopword
+                if matched_text.lower().strip() in self.PERSON_STOPWORDS:
+                    continue
 
             # If Presidio says PERSON but the word is a known village,
             # re-tag as LOCATION. This fixes 'Ludhiana' → NAME mistakes.
@@ -418,6 +429,79 @@ class PresidioPIIDetector:
                 original=matched_text,
                 confidence=float(r.score),
                 source="presidio",
+            ))
+        return matches
+
+
+class IndicNERDetector:
+    """Wraps a multilingual NER model for Devanagari/Indic-script entity detection.
+
+    Uses Davlan/bert-base-multilingual-cased-ner-hrl — an mBERT fine-tuned for
+    NER on 10 languages including Hindi. Open-access alternative to
+    AI4Bharat's gated IndicNER, with comparable performance on Devanagari.
+
+    Catches PERSON / LOCATION / ORGANIZATION entities in Indic-script text
+    that Presidio's English NER and gazetteer-based detection would miss.
+    The detector abstracts the underlying model — switching to AI4Bharat's
+    IndicNER once access is granted is a one-line model_name change.
+    """
+
+    ENTITY_MAP = {
+        "PER": "NAME",
+        "LOC": "LOCATION",
+        "ORG": "ORGANIZATION",
+    }
+
+    def __init__(
+        self,
+        model_name: str = "Davlan/bert-base-multilingual-cased-ner-hrl",
+        villages_gazetteer: set[str] | None = None,
+    ):
+        from transformers import AutoTokenizer, AutoModelForTokenClassification, pipeline
+        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self._model = AutoModelForTokenClassification.from_pretrained(model_name)
+        self._pipe = pipeline(
+            "ner",
+            model=self._model,
+            tokenizer=self._tokenizer,
+            aggregation_strategy="simple",
+            device=-1,
+        )
+        self._villages = villages_gazetteer or set()
+        logger.info(
+            f"Multilingual NER detector initialized ({model_name}) "
+            f"with {len(self._villages)} village cross-references"
+        )
+
+    def detect(self, text: str) -> list[PIIMatch]:
+        if not text or not text.strip():
+            return []
+        try:
+            results = self._pipe(text)
+        except Exception as e:
+            logger.warning(f"Multilingual NER failed on text snippet: {e}")
+            return []
+        matches: list[PIIMatch] = []
+        for r in results:
+            label = r.get("entity_group", "").upper()
+            our_type = self.ENTITY_MAP.get(label)
+            if our_type is None:
+                continue
+            matched_text = text[r["start"]:r["end"]]
+            normalized = matched_text.lower().strip()
+
+            # Cross-reference: if NER says PERSON but the token is a known village,
+            # re-tag as LOCATION. Same correction we apply to Presidio.
+            if our_type == "NAME" and normalized in self._villages:
+                our_type = "LOCATION"
+
+            matches.append(PIIMatch(
+                pii_type=our_type,
+                start=int(r["start"]),
+                end=int(r["end"]),
+                original=matched_text,
+                confidence=float(r["score"]),
+                source="multilingual_ner",
             ))
         return matches
 
@@ -440,9 +524,10 @@ class PIIPipeline:
         redacted, matches = pipeline.redact(text)
     """
 
-    def __init__(self, use_presidio: bool = True):
+    def __init__(self, use_presidio: bool = True, use_indicner: bool = False):
         self.rules = IndianPIIRules()
         self.presidio = PresidioPIIDetector(villages_gazetteer=self.rules.villages) if use_presidio else None
+        self.indicner = IndicNERDetector(villages_gazetteer=self.rules.villages) if use_indicner else None
         self._placeholder_map: dict[tuple[str, str], str] = {}
         self._counters: dict[str, int] = {}
 
@@ -499,20 +584,33 @@ class PIIPipeline:
 
     # ---- main redaction API ----
 
-    def detect(self, text: str) -> list[PIIMatch]:
-        """Run both layers and return the deduped match list."""
+    def detect(self, text: str, language_hint: str | None = None) -> list[PIIMatch]:
+        """Run all detection layers and return the deduped match list.
+
+        Args:
+            text: the string to scan for PII.
+            language_hint: one of "hi", "code_mixed", "en", or None.
+                When "en", the Indic NER layer is skipped (it adds latency
+                and produces false positives on pure-English text).
+        """
         all_matches = self.rules.detect_all(text)
         if self.presidio is not None:
             all_matches.extend(self.presidio.detect(text))
+        if self.indicner is not None and language_hint != "en":
+            all_matches.extend(self.indicner.detect(text))
         return self._dedupe_overlapping(all_matches)
 
-    def redact(self, text: str) -> tuple[str, list[PIIMatch]]:
+    def redact(self, text: str, language_hint: str | None = None) -> tuple[str, list[PIIMatch]]:
         """Return (redacted_text, list_of_matches_applied).
 
         Replaces each PII span with its placeholder. Uses the per-session
         placeholder map so repeated PII gets the same placeholder.
+
+        Args:
+            text: the string to redact.
+            language_hint: forwarded to detect() to control Indic NER usage.
         """
-        matches = self.detect(text)
+        matches = self.detect(text, language_hint=language_hint)
         if not matches:
             return text, []
 
@@ -546,12 +644,13 @@ class PIIPipeline:
             Empty if no PII was found in the trajectory.
         """
         self.reset_session()
+        language_hint = trajectory_dict.get("language_mix")
         audit_records: list[dict] = []
 
         for event in trajectory_dict["events"]:
             # Redact the content field (user/assistant/system messages)
             if event.get("content"):
-                redacted, matches = self.redact(event["content"])
+                redacted, matches = self.redact(event["content"], language_hint=language_hint)
                 if matches:
                     audit_records.append({
                         "event_id": event["event_id"],

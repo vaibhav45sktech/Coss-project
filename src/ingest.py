@@ -36,12 +36,7 @@ _TOOL_DOMAIN: dict[str, str] = {
     "govt_scheme_lookup": "scheme",
 }
 
-# Hinglish markers used for language detection (matched as whole words)
-_HINGLISH_MARKERS = {
-    "mere", "kab", "hai", "kya", "paani", "field", "fasal",
-    "kheti", "kisan", "mandi", "msp", "ka", "ki", "ke", "bhai",
-    "baarish", "ganne", "tamatar", "patti", "keede",
-}
+
 
 
 # ---------------------------------------------------------------------------
@@ -150,24 +145,56 @@ def _classify_domain(tools_used: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 def _detect_language(events: list[RawEvent]) -> str:
-    """
-    Inspect user-role event content to classify the language mix.
+    """Detect the dominant language of a trajectory's user messages.
 
-    Priority: Devanagari characters > Hinglish markers > English.
+    Three-stage detection (most specific wins):
+      1. Devanagari script presence (U+0900–U+097F) → "hi"
+      2. langdetect on concatenated user text → "hi" if detector says hi/mr/ne
+      3. Hinglish marker list → "code_mixed"
+      4. Default → "en"
+
+    Returns one of: "hi", "code_mixed", "en".
     """
-    user_contents = [
+    import re as _re
+    from langdetect import detect_langs, DetectorFactory, LangDetectException
+    DetectorFactory.seed = 0  # deterministic
+
+    HINGLISH_MARKERS = {
+        "mere", "kab", "hai", "kya", "paani", "field", "fasal", "kheti",
+        "kisan", "mandi", "msp", "ka", "ki", "ke", "bhai", "baarish",
+        "ganne", "tamatar", "patti", "keede", "bhav", "rate", "abhi",
+        "aaj", "kal", "chahiye", "karna", "lagta", "lagti", "dena",
+        "milega", "milegi", "mil", "se", "ko", "mein", "par", "tha",
+        "thi", "hua", "hui", "huye", "raha", "rahi", "rahe",
+    }
+
+    user_texts = [
         e.content for e in events
-        if e.role is EventRole.USER and e.content
+        if e.role == EventRole.USER and e.content
     ]
+    if not user_texts:
+        return "en"
+    combined = " ".join(user_texts)
 
-    for text in user_contents:
-        if any("ऀ" <= ch <= "ॿ" for ch in text):
+    # Stage 1: Devanagari script wins outright
+    if _re.search(r"[\u0900-\u097F]", combined):
+        return "hi"
+
+    # Stage 2: langdetect with probability check
+    try:
+        candidates = detect_langs(combined)
+        # candidates is list of LangCandidate with .lang and .prob
+        top = candidates[0]
+        # langdetect's Indic-language hints (hi/mr/ne) trigger hi tag
+        if top.lang in ("hi", "mr", "ne") and top.prob > 0.5:
             return "hi"
+    except LangDetectException:
+        pass
 
-    for text in user_contents:
-        words = set(text.lower().split())
-        if words & _HINGLISH_MARKERS:
-            return "code_mixed"
+    # Stage 3: Hinglish marker overlap
+    tokens = set(_re.findall(r"\b[a-zA-Z]+\b", combined.lower()))
+    if tokens & HINGLISH_MARKERS:
+        return "code_mixed"
 
     return "en"
 
