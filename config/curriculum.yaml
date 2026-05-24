@@ -1,0 +1,85 @@
+# OpenAgriNet Training Curriculum
+#
+# Maps complexity tags and quality labels to staged training schedules.
+# Trainers consume this directly — no code changes needed to retune the
+# curriculum, just edit the YAML.
+#
+# Stages execute in order. Each stage names which dataset slices to include
+# and what training method to apply.
+
+version: 1
+dataset_root: data/exports
+
+stages:
+  - name: stage_1_tool_syntax
+    description: |
+      Teach basic tool-call syntax and chat-template adherence using simple
+      single-tool trajectories.
+    method: sft
+    data_filter:
+      complexity_bucket: ["simple"]
+      quality_label: ["high"]
+      max_records: 500
+    training_args:
+      learning_rate: 2.0e-4
+      epochs: 1
+      max_steps: 200
+
+  - name: stage_2_multi_tool
+    description: |
+      Build multi-step tool-call reasoning with moderate trajectories,
+      including error recovery patterns.
+    method: sft
+    data_filter:
+      complexity_bucket: ["simple", "moderate"]
+      quality_label: ["high", "medium"]
+    training_args:
+      learning_rate: 1.5e-4
+      epochs: 1
+      max_steps: 500
+
+  - name: stage_3_complex_agentic
+    description: |
+      Complex 4+ step trajectories with error recovery and ambiguous queries.
+    method: sft
+    data_filter:
+      complexity_bucket: ["moderate", "complex"]
+      quality_label: ["high", "medium"]
+      had_error_recovery_priority: true
+    training_args:
+      learning_rate: 1.0e-4
+      epochs: 2
+      max_steps: 800
+
+  - name: stage_4_multilingual_robustness
+    description: |
+      Hindi and Hinglish trajectories with multilingual replies.
+    method: sft
+    data_filter:
+      language_mix: ["hi", "code_mixed"]
+      quality_label: ["high"]
+    training_args:
+      learning_rate: 1.0e-4
+      epochs: 2
+
+  - name: stage_5_persona_dpo
+    description: |
+      Direct Preference Optimization against persona-violating rejections.
+      Targets persona adherence and tool-citation discipline.
+    method: dpo
+    data_source: dpo_pairs.jsonl
+    data_filter:
+      sources: ["repair_pair", "quality_contrast", "persona_synthetic"]
+    training_args:
+      learning_rate: 5.0e-7
+      beta: 0.1
+      epochs: 1
+
+# Sampling weights for mixed-stage training (alternative to sequential stages)
+sampling_weights:
+  simple_high_quality: 0.25
+  moderate_high_quality: 0.30
+  complex_high_quality: 0.15
+  multilingual_high_quality: 0.15
+  recovery_trajectories: 0.10
+  dpo_pairs: 0.05
