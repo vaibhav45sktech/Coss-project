@@ -87,6 +87,18 @@ def _format_assistant_reply(recipe: QueryRecipe, tool_results: list[ToolResult])
     If the recipe provides an `assistant_template`, use it (with simple
     string formatting). Otherwise synthesize one based on tool outputs.
     """
+    successful = [r for r in tool_results if r.status == "ok"]
+    has_failures = len(successful) < len(tool_results)
+    all_failed = not successful
+
+    # Deliberately bad replies for failure-mode templates — these become
+    # the "rejected" examples for DPO pair construction in Module 9.
+    if all_failed:
+        return "I don't know."
+    template_name = recipe.metadata.get("template", "")
+    if template_name == "template_invalid_args_dropped" and has_failures:
+        return "Unable to process that request right now."
+
     if recipe.assistant_template:
         # Best-effort template fill; ignore missing keys
         try:

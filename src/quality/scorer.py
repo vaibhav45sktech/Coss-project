@@ -312,8 +312,13 @@ class HeuristicScorer:
 
         # Penalty: tool returned data but reply is suspiciously short
         if tool_results and len(final_reply.split()) < 10:
-            score -= 0.2
+            score -= 0.3
             rationale.append("Tools returned data but reply is very short")
+
+        # Hard cap: explicit "don't know" or "unable" → goal completion fails
+        if any(m in final_reply.lower() for m in DUNNO_MARKERS + ["unable to"]):
+            score = min(score, 0.2)
+            rationale.append("Reply concedes inability — goal not completed")
 
         # Bonus: reply length proportional to query complexity
         if len(final_reply.split()) >= 15 and overlap_ratio >= 0.3:
@@ -332,9 +337,11 @@ class HeuristicScorer:
 
     @staticmethod
     def _label(composite: float) -> Literal["high", "medium", "low"]:
-        if composite >= 0.75:
+        # Calibrated against observed heuristic distribution on synthetic data.
+        # Production data should re-tune via the audit-sample feedback loop.
+        if composite >= 0.80:
             return "high"
-        if composite >= 0.5:
+        if composite >= 0.60:
             return "medium"
         return "low"
 
