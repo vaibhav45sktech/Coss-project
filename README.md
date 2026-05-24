@@ -10,7 +10,7 @@ This is my implementation-first prototype: I wanted to come to the proposal with
 
 ## Why I built this
 
-I read through the ticket carefully and then re-read every comment Gautam left in the discussion thread. A few things stood out to me as the real priorities, distinct from a generic data-pipeline ticket:
+I read through the ticket carefully and then re-read every comment Gautam  Sir left in the discussion thread. A few things stood out to me as the real priorities, distinct from a generic data-pipeline ticket:
 
 1. **Data creation matters more than the trainer.** Gautam said this explicitly — focus on extracting high-quality, diverse data from logs, not just plumbing logs through to a trainer.
 2. **Multilingual is the real fine-tuning goal.** Agri-bot users speak Hindi, Hinglish, Devanagari, regional languages. PII detection that only handles English is half-built.
@@ -18,7 +18,7 @@ I read through the ticket carefully and then re-read every comment Gautam left i
 4. **Persona adherence and tool-call efficiency are real quality signals**, not nice-to-haves. Replies that don't match the persona or that loop on tool calls are bad data.
 5. **Hard examples are valuable.** Failed trajectories shouldn't just be dropped — they should be repaired by a teacher and become preference pairs.
 
-I built this in roughly 5 days, module by module. Each module is independently runnable and committed separately so the git history reads as steady progress.
+I built this in roughly 7 days, module by module. Each module is independently runnable and committed separately so the git history reads as steady progress.
 
 ---
 
@@ -153,7 +153,7 @@ flowchart TD
 
 ## Quick start — reproducing my results end-to-end
 
-The mentor or anyone evaluating can reproduce everything below. Total time on a laptop: about 15 minutes the first time (model downloads), under 5 minutes on every subsequent run.
+ anyone evaluating can reproduce everything below. Total time on a laptop: about 15 minutes the first time (model downloads), under 5 minutes on every subsequent run.
 
 ### Prerequisites
 
@@ -162,7 +162,7 @@ The mentor or anyone evaluating can reproduce everything below. Total time on a 
 - ~3 GB of free disk space for cached models (Qwen tokenizer, en_core_web_lg, Davlan NER)
 - An internet connection for the first run to download models from HuggingFace Hub
 
-I do NOT need a GPU. The LoRA dry-run runs on CPU.
+No need Of a GPU. The LoRA dry-run runs on CPU.
 
 ### Step 1: Clone and set up the environment
 
