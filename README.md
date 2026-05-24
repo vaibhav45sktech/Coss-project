@@ -2,7 +2,7 @@
 
 > A production-minded data pipeline that ingests agricultural agent logs, strips Indian-context PII, generates diverse synthetic training data through grounded mock tools, scores quality against a swappable persona spec, and exports both LoRA-ready SFT JSONL and TRL-compatible DPO preference pairs — with a passing LoRA dry-run on Qwen2.5 proving the data is training-ready end-to-end.
 
-Built by **Vaibhav Mishra** for the C4GT DMP 2026 ticket *"Build the pipeline that converts logs into training data setup"* under [COSS](https://github.com/CivicDataLab) / OpenAgriNet.
+Built by **Vaibhav Mishra** for the C4GT DMP 2026 ticket *"Build the pipeline that converts logs into training data setup"* under [Openagrinet](https://github.com/OpenAgriNet) / OpenAgriNet.
 
 This is my implementation-first prototype: I wanted to come to the proposal with something concrete that proves I understand the problem, not just a plan.
 
