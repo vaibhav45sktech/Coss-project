@@ -149,8 +149,7 @@ flowchart TD
     J -- no --> K2
 ```
 
-How to update your README
-Option A: Qui
+
 
 ## Quick start — reproducing my results end-to-end
 
