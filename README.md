@@ -40,160 +40,117 @@ I built this in roughly 5 days, module by module. Each module is independently r
 ---
 
 ## Architecture mind-map
+## Architecture mind-map
 
-How the pieces fit together:
-                          RAW INPUTS
-            ┌──────────────────────────────────┐
-            │                                  │
-   Custom event-stream JSONL          Langfuse/Pydantic-AI traces
-   (src/ingest.py)                    (src/langfuse_parser.py)
-            │                                  │
-            └─────────────────┬────────────────┘
-                              │
-                              ▼
-                   ┌────────────────────┐
-                   │  Canonical         │
-                   │  Trajectory        │   ← Same schema for both inputs.
-                   │  (Pydantic v2)     │      Production logs and synthetic
-                   └────────┬───────────┘      data flow through identically.
-                            │
-          ┌─────────────────┼─────────────────┐
-          │                 │                 │
-          ▼                 ▼                 ▼
-   ┌────────────┐    ┌────────────┐    ┌────────────┐
-   │ Mock Tools │    │ PII Layers │    │  Quality   │
-   │ (Module 5) │    │ (Module 3) │    │  Scorer    │
-   │            │    │ rules +    │    │ (Module 7) │
-   │ 5 tools,   │    │ gazetteer+ │    │            │
-   │ schema     │    │ Presidio + │    │ persona +  │
-   │ validation │    │ Davlan NER │    │ efficiency │
-   └─────┬──────┘    │ + audit    │    │ + goal     │
-         │           └─────┬──────┘    └─────┬──────┘
-         │                 │                 │
-         ▼                 ▼                 ▼
-   ┌────────────┐    ┌────────────┐    ┌────────────┐
-   │ Synthetic  │    │  Redacted  │    │  Quality-  │
-   │ Generator  │    │ Trajectories│    │   tagged   │
-   │ (Module 6) │    │             │    │ trajectories│
-   │            │    │             │    │            │
-   │ Templated  │    │ Per-session │    │ high /     │
-   │ + LLM stub │    │ placeholders│    │ medium /   │
-   │            │    │             │    │ low labels │
-   └─────┬──────┘    └─────┬──────┘    └─────┬──────┘
-         │                 │                 │
-         └─────────────────┼─────────────────┘
-                           │
-                           ▼
-              ┌────────────────────────┐
-              │  Trajectory Repair     │
-              │  (Module 8)            │
-              │                        │
-              │  Rule-based fixes for  │
-              │  low-quality trajectories
-              │  + LLM teacher stub    │
-              └─────────┬──────────────┘
-                        │
-          ┌─────────────┴─────────────┐
-          │                           │
-          ▼                           ▼
-   ┌────────────┐             ┌────────────────┐
-   │  SFT JSONL │             │   DPO Pairs    │
-   │ Qwen2.5    │             │   (TRL format) │
-   │ chat       │             │                │
-   │ template + │             │ Sources:       │
-   │ Hermes     │             │ • repair       │
-   │ tool calls │             │ • quality      │
-   │            │             │   contrast     │
-   │            │             │ • persona      │
-   │            │             │   synthetic    │
-   └─────┬──────┘             └────────┬───────┘
-         │                             │
-         ▼                             ▼
-   ┌────────────┐             ┌────────────────┐
-   │ MinHash    │             │ curriculum.yaml│
-   │ Splitter   │             │                │
-   │ (Jaccard   │             │ 5 staged       │
-   │  0.7)      │             │ training       │
-   │            │             │ schedules      │
-   │ train/eval/│             │                │
-   │ preference │             │                │
-   └─────┬──────┘             └────────────────┘
-         │
-         ▼
-   ┌────────────────────────────────────┐
-   │  LoRA Dry-Run (Module 10)          │
-   │                                    │
-   │  Qwen2.5-0.5B-Instruct on CPU      │
-   │  PEFT LoRA r=8, target q/v_proj    │
-   │  TRL SFTTrainer, 2 steps × 10 samples │
-   │  → ✅ Training-ready proof         │
-   └────────────────────────────────────┘
+How the pieces fit together — production logs and synthetic data flow through the same canonical schema, so downstream modules don't care which input they got:
 
----
+```mermaid
+flowchart TD
+    classDef input fill:#1e3a8a,stroke:#3b82f6,color:#fff
+    classDef core fill:#065f46,stroke:#10b981,color:#fff
+    classDef pii fill:#7c2d12,stroke:#f97316,color:#fff
+    classDef synth fill:#581c87,stroke:#a855f7,color:#fff
+    classDef quality fill:#831843,stroke:#ec4899,color:#fff
+    classDef export fill:#1e40af,stroke:#60a5fa,color:#fff
+    classDef proof fill:#14532d,stroke:#22c55e,color:#fff
+
+    A1[Custom event-stream JSONLsrc/ingest.py]:::input
+    A2[Langfuse / Pydantic-AI tracessrc/langfuse_parser.py]:::input
+
+    B[Canonical Trajectory schemaPydantic v2Same shape for both inputs]:::core
+
+    C1[Mock Tool EnvironmentModule 55 tools + schema validation+ controlled failures]:::core
+    C2[PII Layers — Module 3Rules + Gazetteer+ Presidio + Davlan NER+ 5% audit sample]:::pii
+    C3[Quality Scorer — Module 7Persona + Efficiency+ Goal Completion]:::quality
+
+    D1[Synthetic Generator — Module 6Templated + LLM-guided stubGrounded through mock tools]:::synth
+    D2[Redacted TrajectoriesPer-session placeholders]:::pii
+    D3[Quality-tagged Trajectorieshigh / medium / low]:::quality
+
+    E[Trajectory Repair — Module 8Rule-based fixes+ LLM teacher stub]:::quality
+
+    F1[SFT JSONLQwen2.5 chat template+ Hermes tool calls]:::export
+    F2[DPO Pairs — TRL formatSources: repair / contrast / persona-synthetic]:::export
+
+    G1[MinHash SplitterJaccard 0.7train / eval / preference]:::export
+    G2[curriculum.yaml5 staged training schedules]:::export
+
+    H[LoRA Dry-Run — Module 10Qwen2.5-0.5B-Instruct on CPUPEFT r=8, TRL SFTTrainerTraining-ready proof]:::proof
+
+    A1 --> B
+    A2 --> B
+    B --> C1
+    B --> C2
+    B --> C3
+    C1 --> D1
+    C2 --> D2
+    C3 --> D3
+    D1 --> B
+    D2 --> E
+    D3 --> E
+    E --> F1
+    E --> F2
+    F1 --> G1
+    F2 --> G2
+    G1 --> H
+```
+
+
+
 
 ## Decision-flow mind-map: one trajectory's journey
+What happens to a single trajectory as it travels from raw log to training data:
 
-What happens to a single trajectory from log to training data:
-   ┌─────────────────────┐
-   │  Raw event stream   │
-   │  OR Langfuse trace  │
-   └──────────┬──────────┘
-              │
-              ▼
-   ┌─────────────────────┐
-   │ Schema validation   │──── malformed? ──→ Quarantine + log
-   └──────────┬──────────┘
-              │ valid
-              ▼
-   ┌─────────────────────┐
-   │ Group by session    │
-   │ Sort by timestamp   │
-   └──────────┬──────────┘
-              │
-              ▼
-   ┌─────────────────────┐
-   │ Tag metadata        │
-   │ • complexity        │
-   │ • domain            │
-   │ • language          │
-   │ • had_error_recovery│
-   └──────────┬──────────┘
-              │
-              ▼
-   ┌─────────────────────┐
-   │ PII Redaction       │
-   │ (4 layers)          │──── audit sample (5%)
-   └──────────┬──────────┘     written to JSON for human review
-              │
-              ▼
-   ┌─────────────────────┐
-   │ Quality Scoring     │
-   │ persona + efficiency│
-   │ + goal completion   │
-   └──────────┬──────────┘
-              │
-    ┌─────────┼─────────┐
-    │         │         │
-   HIGH     MEDIUM     LOW
-    │         │         │
-    ▼         ▼         ▼
-SFT data   SFT data    Repair?
-chosen     usable     ┌──────┐
-half of    if scarce  │ Rule │
-DPO pairs            │ based│
-                      │ fix  │
-                      └───┬──┘
-                          │ repaired
-                          ▼
-                      ┌──────────┐
-                      │ DPO pair:│
-                      │ chosen = │
-                      │ repaired │
-                      │rejected =│
-                      │ original │
-                      └──────────┘
+```mermaid
+flowchart TD
+    classDef start fill:#1e3a8a,stroke:#3b82f6,color:#fff
+    classDef process fill:#065f46,stroke:#10b981,color:#fff
+    classDef decision fill:#7c2d12,stroke:#f97316,color:#fff
+    classDef quality fill:#831843,stroke:#ec4899,color:#fff
+    classDef output fill:#14532d,stroke:#22c55e,color:#fff
+    classDef reject fill:#7f1d1d,stroke:#ef4444,color:#fff
 
----
+    A[Raw event streamOR Langfuse trace]:::start
+    B{Schema valid?}:::decision
+    B1[Quarantine + log]:::reject
+
+    C[Group by session_idSort by timestamp]:::process
+    D[Tag metadata:complexity / domain / languagehad_error_recovery]:::process
+
+    E[PII Redaction — 4 layers]:::process
+    E1[5% audit samplewritten to JSON for human review]:::output
+
+    F[Quality Scoringpersona + efficiency + goal]:::quality
+    G{Quality label?}:::decision
+
+    H1[HIGHSFT datachosen half of DPO pairs]:::output
+    H2[MEDIUMSFT data — usableif scarce]:::output
+    H3[LOWSend to repair]:::decision
+
+    I[Rule-based repair attempt]:::process
+    J{Repaired?}:::decision
+    K1[DPO pair:chosen = repairedrejected = original]:::output
+    K2[Droppedor flagged forLLM teacher]:::reject
+
+    A --> B
+    B -- no --> B1
+    B -- yes --> C
+    C --> D
+    D --> E
+    E --> E1
+    E --> F
+    F --> G
+    G -- high --> H1
+    G -- medium --> H2
+    G -- low --> H3
+    H3 --> I
+    I --> J
+    J -- yes --> K1
+    J -- no --> K2
+```
+
+How to update your README
+Option A: Qui
 
 ## Quick start — reproducing my results end-to-end
 
